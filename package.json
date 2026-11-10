@@ -1,0 +1,41 @@
+{
+  "name": "mailhub-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server that puts many Gmail and Outlook mailboxes behind one connector for Claude. Authorise each account once, search old and new mail across all of them.",
+  "type": "module",
+  "main": "dist/cli.js",
+  "bin": {
+    "mailhub-mcp": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "prepare": "tsc",
+    "start": "node dist/cli.js",
+    "test": "tsc && node --test test/*.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "gmail",
+    "outlook",
+    "microsoft-graph",
+    "claude"
+  ],
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.6",
+    "typescript": "^7.0.2"
+  },
+  "private": true
+}
