@@ -12,6 +12,7 @@ globalThis.fetch = async (input) => {
   if (url.includes("login.microsoftonline.com")) return json({ access_token: "m", expires_in: 3600 });
 
   if (url.includes("gmail.googleapis.com")) {
+    if (/\/drafts$/.test(url)) return json({ id: "d1", message: { id: "dm1", threadId: "dt1" } });
     if (/\/messages\?/.test(url)) return json({ messages: [{ id: "g1" }] });
     if (/\/messages\/g1\/attachments\/att/.test(url)) return json({ data: b64url("col1,col2\n1,2\n") });
     if (/\/messages\/g1\?/.test(url)) {

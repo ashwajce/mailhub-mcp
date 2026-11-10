@@ -1,8 +1,11 @@
-import { apiJson } from "../auth.js";
+import { apiJson, requireDraftAccess } from "../auth.js";
+import { Address, parseAddresses } from "../mime.js";
 import {
   Account,
   AttachmentData,
   AttachmentInfo,
+  DraftInput,
+  DraftResult,
   MailhubError,
   MessageFull,
   MessageSummary,
@@ -16,6 +19,8 @@ const GRAPH = "https://graph.microsoft.com/v1.0";
 
 // Plain-text bodies, and ids that stay valid when a message moves between folders.
 const PREFER = { Prefer: 'outlook.body-content-type="text", IdType="ImmutableId"' };
+// For drafts the body is kept in its original format, so only the id preference applies.
+const PREFER_IDS = { Prefer: 'IdType="ImmutableId"' };
 
 const SUMMARY_FIELDS =
   "id,conversationId,subject,from,toRecipients,receivedDateTime,bodyPreview,isRead,hasAttachments";
@@ -37,6 +42,7 @@ interface GraphMessage {
   isRead?: boolean;
   hasAttachments?: boolean;
   body?: { contentType?: string; content?: string };
+  webLink?: string;
 }
 
 interface GraphList<T> {
@@ -156,6 +162,39 @@ async function listAttachments(account: Account, messageId: string): Promise<Att
   }));
 }
 
+function toRecipients(list: Address[]): GraphRecipient[] {
+  return list.map((a) => ({ emailAddress: { address: a.email, ...(a.name ? { name: a.name } : {}) } }));
+}
+
+function escapeHtml(text: string): string {
+  return text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+}
+
+/** Put the reply text above the quoted original that Outlook generated, keeping the original's format. */
+export function composeReplyBody(text: string, quoted: { contentType?: string; content?: string } | undefined) {
+  const original = quoted?.content ?? "";
+  if (quoted?.contentType?.toLowerCase() !== "html") {
+    return { contentType: "text", content: original ? `${text}\n\n${original}` : text };
+  }
+  const mine = `<div>${escapeHtml(text).replace(/\r\n?|\n/g, "<br>")}</div><br>`;
+  const content = /<body[^>]*>/i.test(original)
+    ? original.replace(/<body[^>]*>/i, (tag) => tag + mine)
+    : mine + original;
+  return { contentType: "html", content };
+}
+
+function draftResult(m: GraphMessage): DraftResult {
+  return {
+    draftId: m.id,
+    messageId: m.id,
+    threadId: m.conversationId ?? "",
+    subject: m.subject ?? "",
+    to: (m.toRecipients ?? []).map(formatRecipient).join(", "),
+    cc: (m.ccRecipients ?? []).map(formatRecipient).join(", "),
+    ...(m.webLink ? { webLink: m.webLink } : {}),
+  };
+}
+
 export const outlook: Provider = {
   async search(account: Account, params: SearchParams): Promise<SearchResult> {
     let url: string;
@@ -224,5 +263,46 @@ export const outlook: Provider = {
       mimeType: a.contentType ?? "application/octet-stream",
       data: Buffer.from(a.contentBytes, "base64"),
     };
+  },
+
+  async createDraft(account: Account, draft: DraftInput): Promise<DraftResult> {
+    requireDraftAccess(account);
+    const to = parseAddresses(draft.to);
+    const cc = parseAddresses(draft.cc);
+    const bcc = parseAddresses(draft.bcc);
+    const base = mailboxBase(account);
+
+    if (!draft.replyToMessageId) {
+      const created = await apiJson<GraphMessage>(account, `${base}/messages`, PREFER_IDS, {
+        subject: draft.subject ?? "",
+        body: { contentType: "text", content: draft.body },
+        toRecipients: toRecipients(to),
+        ccRecipients: toRecipients(cc),
+        bccRecipients: toRecipients(bcc),
+      });
+      return draftResult(created);
+    }
+
+    // Step 1: let Outlook build the reply (recipients, subject, quoted original, thread).
+    const overrides: Record<string, unknown> = {};
+    if (to.length) overrides.toRecipients = toRecipients(to);
+    if (cc.length) overrides.ccRecipients = toRecipients(cc);
+    if (bcc.length) overrides.bccRecipients = toRecipients(bcc);
+    const action = draft.replyAll ? "createReplyAll" : "createReply";
+    const reply = await apiJson<GraphMessage>(
+      account,
+      `${base}/messages/${encodeURIComponent(draft.replyToMessageId)}/${action}`,
+      PREFER_IDS,
+      Object.keys(overrides).length ? { message: overrides } : {},
+    );
+    // Step 2: write the reply text above the quoted original.
+    const updated = await apiJson<GraphMessage>(
+      account,
+      `${base}/messages/${encodeURIComponent(reply.id)}`,
+      PREFER_IDS,
+      { body: composeReplyBody(draft.body, reply.body) },
+      "PATCH",
+    );
+    return draftResult({ ...reply, ...updated });
   },
 };

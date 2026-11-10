@@ -2,7 +2,7 @@
 import fs from "node:fs";
 import { parseArgs } from "node:util";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { GMAIL_SCOPES, OUTLOOK_SCOPES, OUTLOOK_SHARED_SCOPE, oauthSettings } from "./auth.js";
+import { canDraft, oauthSettings, scopesFor } from "./auth.js";
 import { accountsPath, configPath, homeDir, loadConfig, saveConfigPatch } from "./config.js";
 import { authorizeInBrowser } from "./oauth.js";
 import { providerFor } from "./providers/index.js";
@@ -21,6 +21,7 @@ Usage:
   mailhub-mcp add gmail <alias>               Sign in to a Gmail / Google Workspace mailbox
   mailhub-mcp add outlook <alias>             Sign in to an Outlook / Microsoft 365 mailbox
       --login-hint <email>                    Pre-select the account on the sign-in page
+      --drafts                                Also allow Claude to save drafts (never send)
       --shared-mailbox <email>                Outlook: read a shared or delegated mailbox
       --tenant <id-or-domain>                 Outlook: sign in against one specific tenant
       --force                                 Replace an existing alias (re-authorise)
@@ -79,6 +80,7 @@ async function add(
   const sharedMailbox = (opts["shared-mailbox"] as string | undefined)?.toLowerCase();
   const tenant = opts.tenant as string | undefined;
   const openBrowser = !opts["no-browser"];
+  const drafts = Boolean(opts.drafts);
   if (provider === "gmail" && (sharedMailbox || tenant)) {
     throw new MailhubError("--shared-mailbox and --tenant only apply to Outlook accounts.");
   }
@@ -87,17 +89,20 @@ async function add(
   let account: Account;
 
   if (provider === "gmail") {
+    const scopes = scopesFor("gmail", { drafts });
     const tokens = await authorizeInBrowser({
       ...settings,
-      scopes: GMAIL_SCOPES,
+      scopes,
       redirectHost: "127.0.0.1",
       // offline + consent makes Google issue a refresh token every time.
       extraParams: { access_type: "offline", prompt: "consent select_account", ...(loginHint ? { login_hint: loginHint } : {}) },
       openBrowser,
     });
     if (!tokens.refresh_token) throw new MailhubError("Google did not return a refresh token. Try again with --force.");
-    if (tokens.scope && !tokens.scope.split(" ").includes(GMAIL_SCOPES[0])) {
-      throw new MailhubError("Gmail access was not granted. Run the command again and tick the Gmail permission on the consent page.");
+    // Google lets the user untick individual permissions on the consent page.
+    const granted = tokens.scope?.split(" ");
+    if (granted && scopes.some((scope) => !granted.includes(scope))) {
+      throw new MailhubError("Not all Gmail permissions were granted. Run the command again and tick every box on the consent page.");
     }
     const profile = await getJson<{ emailAddress: string }>(
       "https://gmail.googleapis.com/gmail/v1/users/me/profile",
@@ -109,11 +114,11 @@ async function add(
       email: profile.emailAddress,
       login: profile.emailAddress,
       refreshToken: tokens.refresh_token,
-      scopes: GMAIL_SCOPES,
+      scopes,
       addedAt: new Date().toISOString(),
     };
   } else {
-    const scopes = sharedMailbox ? [...OUTLOOK_SCOPES, OUTLOOK_SHARED_SCOPE] : OUTLOOK_SCOPES;
+    const scopes = scopesFor("outlook", { drafts, shared: Boolean(sharedMailbox) });
     const tokens = await authorizeInBrowser({
       ...settings,
       scopes,
@@ -153,7 +158,7 @@ async function add(
     (a) => a.alias !== alias && a.provider === account.provider && a.email.toLowerCase() === account.email.toLowerCase(),
   );
   saveAccount(account);
-  console.log(`Connected ${account.email} as "${alias}" (${provider}).`);
+  console.log(`Connected ${account.email} as "${alias}" (${provider}, ${drafts ? "read + drafts" : "read-only"}).`);
   if (duplicate) console.log(`Note: the same mailbox is also connected as "${duplicate.alias}".`);
 }
 
@@ -166,7 +171,8 @@ function list(): void {
   const width = Math.max(...accounts.map((a) => a.alias.length), 5);
   for (const a of accounts) {
     const via = a.sharedMailbox ? `  (via ${a.login})` : "";
-    console.log(`${a.alias.padEnd(width)}  ${a.provider.padEnd(7)}  ${a.email}${via}`);
+    const access = canDraft(a) ? "read+drafts" : "read-only";
+    console.log(`${a.alias.padEnd(width)}  ${a.provider.padEnd(7)}  ${access.padEnd(11)}  ${a.email}${via}`);
   }
 }
 
@@ -215,6 +221,7 @@ async function main(): Promise<void> {
       "login-hint": { type: "string" },
       "shared-mailbox": { type: "string" },
       force: { type: "boolean" },
+      drafts: { type: "boolean" },
       "no-browser": { type: "boolean" },
       help: { type: "boolean", short: "h" },
       version: { type: "boolean", short: "v" },

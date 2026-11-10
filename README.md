@@ -5,7 +5,9 @@ A local MCP server that puts many Gmail and Outlook mailboxes behind one connect
 - Connect as many mailboxes as you like (Gmail, Google Workspace, Microsoft 365, Outlook.com).
 - Sign in to each mailbox **once**. Refresh tokens are kept on your computer and renewed automatically.
 - Search old and new mail in one mailbox or across all of them in a single question.
-- **Read-only**: it requests `gmail.readonly` and `Mail.Read` only. It cannot send, delete or change mail.
+- **Read-only by default**: it requests `gmail.readonly` and `Mail.Read` only.
+- **Drafts are opt-in** per mailbox (`--drafts`). Claude can then save a draft for you to review and send.
+- It has **no way to send, delete or change mail**. Those tools do not exist in the code.
 
 ```
 Claude desktop app  --stdio-->  mailhub-mcp  --+--> Gmail API            (personal, work-nl, ...)
@@ -21,12 +23,14 @@ Claude desktop app  --stdio-->  mailhub-mcp  --+--> Gmail API            (person
 | `read_email` | Full message: headers, plain-text body, attachment list. |
 | `read_thread` | Every message of a conversation, oldest first. |
 | `download_attachment` | Saves an attachment to the local download folder and returns its path. |
+| `create_draft` | Saves a draft (new message, reply or reply-all) in a mailbox added with `--drafts`. Never sends. |
 
 Example prompts once it is connected:
 
 - "Search all my mailboxes for the Acme invoice from October."
 - "What unread mail came into work-uk this week?"
 - "Read the latest thread from the accountant in work-in and summarise it."
+- "Draft a reply to that thread saying the documents will follow on Friday."
 
 ## Requirements
 
@@ -51,7 +55,8 @@ One Google Cloud OAuth client covers every Gmail and Workspace account you conne
 1. Open <https://console.cloud.google.com>, create a project (for example `mailhub`).
 2. **APIs & Services > Library**: enable the **Gmail API**.
 3. **APIs & Services > OAuth consent screen**: user type **External**, fill in the app name and your email.
-   Add the scope `https://www.googleapis.com/auth/gmail.readonly`.
+   Add the scope `https://www.googleapis.com/auth/gmail.readonly`, and
+   `https://www.googleapis.com/auth/gmail.compose` if you plan to use drafts.
 4. Set the publishing status to **In production**. This matters: while the app is in "Testing",
    Google expires refresh tokens after 7 days and you would have to sign in again every week.
    For personal use you do not need to submit the app for verification; you will see a
@@ -74,7 +79,8 @@ One Entra app registration covers work tenants and personal Outlook.com / Hotmai
 2. Supported account types: **Accounts in any organizational directory and personal Microsoft accounts**.
 3. Redirect URI: platform **Public client/native (mobile & desktop)**, value `http://localhost`.
 4. **API permissions > Add > Microsoft Graph > Delegated**: `Mail.Read`, `User.Read`, `offline_access`.
-   Add `Mail.Read.Shared` too if you want to read shared or delegated mailboxes.
+   Add `Mail.Read.Shared` too if you want to read shared or delegated mailboxes, and `Mail.ReadWrite`
+   (or `Mail.ReadWrite.Shared`) if you plan to use drafts.
 5. Copy the **Application (client) ID** from the Overview page (no client secret is needed):
 
 ```bash
@@ -97,10 +103,16 @@ mailhub-mcp add outlook hotmail
 # A shared or delegated Microsoft 365 mailbox, signed in as yourself:
 mailhub-mcp add outlook billing --shared-mailbox billing@yourdomain.com
 
-mailhub-mcp list        # show what is connected
+# Allow Claude to save drafts in a mailbox (it still cannot send):
+mailhub-mcp add outlook work-in --drafts
+
+mailhub-mcp list        # show what is connected, and which mailboxes allow drafts
 mailhub-mcp check       # verify every stored sign-in still works
 mailhub-mcp remove hotmail
 ```
+
+To switch drafts on for a mailbox you already added, sign in again:
+`mailhub-mcp add gmail personal --drafts --force`.
 
 Other options: `--force` re-authorises an existing alias, `--tenant <domain>` signs in against one
 specific Microsoft tenant, `--no-browser` prints the sign-in URL instead of opening it.
@@ -153,6 +165,16 @@ To revoke access entirely, remove the alias and also remove the app under
 When a sign-in does lapse, the tool error tells you the exact command, for example
 `mailhub-mcp add gmail personal --force`.
 
+## Drafts
+
+- Off unless the mailbox was added with `--drafts`. `list_accounts` and `mailhub-mcp list` show which ones allow it.
+- A draft lands in the mailbox's normal Drafts folder. You open it in Gmail or Outlook, check it and send it yourself.
+- Replies stay in the original conversation. Outlook reply drafts include the quoted original; Gmail reply
+  drafts contain only the new text.
+- Bodies are plain text. Attachments cannot be added to drafts.
+- Scopes: Outlook uses `Mail.ReadWrite`, which cannot send. Gmail has no drafts-only permission, so it uses
+  `gmail.compose`, which technically also covers sending. mailhub contains no code that sends.
+
 ## Search notes
 
 - The structured filters (`from`, `to`, `subject`, `after`, `before`, ...) work on every provider.
@@ -164,7 +186,7 @@ When a sign-in does lapse, the tool error tells you the exact command, for examp
 
 ## Limitations
 
-- Read-only by design. Sending or drafting would need broader scopes and is deliberately left out.
+- No sending, deleting, moving or labelling, by design.
 - Local only: it works while this computer is on and the Claude desktop app is open. To use it from
   a phone or from scheduled tasks, host the same code behind a remote MCP endpoint.
 - Tokens are stored in a permission-restricted file, not the OS keychain.
@@ -173,7 +195,7 @@ When a sign-in does lapse, the tool error tells you the exact command, for examp
 
 ```bash
 npm run build
-npm test        # 28 tests: unit, mocked Gmail/Graph APIs, OAuth loopback flow, stdio end-to-end
+npm test        # unit, mocked Gmail/Graph APIs, OAuth loopback flow, stdio end-to-end
 ```
 
 Layout:
@@ -183,6 +205,7 @@ src/cli.ts                 command line and stdio entry point
 src/server.ts              MCP tools
 src/auth.ts                token refresh, caching, authenticated requests
 src/oauth.ts               browser sign-in (authorisation code + PKCE on a loopback port)
+src/mime.ts                address parsing and message building for Gmail drafts
 src/store.ts, config.ts    accounts.json and config.json
 src/providers/gmail.ts     Gmail API
 src/providers/outlook.ts   Microsoft Graph API

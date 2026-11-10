@@ -1,8 +1,11 @@
-import { apiJson } from "../auth.js";
+import { apiJson, requireDraftAccess } from "../auth.js";
+import { Address, buildMime, formatAddress, parseAddress, parseAddresses, splitAddressList } from "../mime.js";
 import {
   Account,
   AttachmentData,
   AttachmentInfo,
+  DraftInput,
+  DraftResult,
   MailhubError,
   MessageFull,
   MessageSummary,
@@ -137,6 +140,21 @@ async function toFull(account: Account, m: GmailMessage, maxBodyChars: number): 
   };
 }
 
+/** Addresses from a received header. Entries that cannot be parsed are skipped rather than failing the reply. */
+function headerAddresses(value: string): Address[] {
+  return splitAddressList(value).flatMap((item) => {
+    try {
+      return [parseAddress(item)];
+    } catch {
+      return [];
+    }
+  });
+}
+
+const REPLY_HEADERS = ["Message-ID", "References", "Subject", "From", "Reply-To", "To", "Cc"]
+  .map((h) => `metadataHeaders=${h}`)
+  .join("&");
+
 export const gmail: Provider = {
   async search(account: Account, params: SearchParams): Promise<SearchResult> {
     const qs = new URLSearchParams({ maxResults: String(params.maxResults) });
@@ -180,6 +198,61 @@ export const gmail: Provider = {
       filename: part.filename ?? "attachment",
       mimeType: part.mimeType ?? "application/octet-stream",
       data: await partBytes(account, messageId, part),
+    };
+  },
+
+  async createDraft(account: Account, draft: DraftInput): Promise<DraftResult> {
+    requireDraftAccess(account);
+    let to = parseAddresses(draft.to);
+    let cc = parseAddresses(draft.cc);
+    const bcc = parseAddresses(draft.bcc);
+    let subject = draft.subject ?? "";
+    let threadId: string | undefined;
+    let inReplyTo: string | undefined;
+    let references: string | undefined;
+
+    if (draft.replyToMessageId) {
+      const original = await apiJson<GmailMessage>(
+        account,
+        `${API}/messages/${encodeURIComponent(draft.replyToMessageId)}?format=metadata&${REPLY_HEADERS}`,
+      );
+      const h = (name: string) => header(original.payload, name).replace(/\s+/g, " ").trim();
+      threadId = original.threadId;
+      // These two headers are what keep the reply inside the conversation for every recipient.
+      inReplyTo = h("Message-ID") || undefined;
+      references = [h("References"), h("Message-ID")].filter(Boolean).join(" ") || undefined;
+      subject = /^re:/i.test(h("Subject")) ? h("Subject") : `Re: ${h("Subject")}`;
+
+      const self = account.email.toLowerCase();
+      const from = headerAddresses(h("Reply-To") || h("From"));
+      const originalTo = headerAddresses(h("To"));
+      const sentByMe = from.some((a) => a.email.toLowerCase() === self);
+      if (!to.length) to = sentByMe ? originalTo : from;
+      if (draft.replyAll && !cc.length) {
+        const seen = new Set([self, ...to.map((a) => a.email.toLowerCase())]);
+        cc = [...originalTo, ...headerAddresses(h("Cc"))].filter((a) => {
+          const key = a.email.toLowerCase();
+          if (seen.has(key)) return false;
+          seen.add(key);
+          return true;
+        });
+      }
+    }
+
+    const raw = buildMime({ to, cc, bcc, subject, body: draft.body, inReplyTo, references });
+    const created = await apiJson<{ id: string; message?: { id?: string; threadId?: string } }>(
+      account,
+      `${API}/drafts`,
+      {},
+      { message: { raw: Buffer.from(raw, "utf8").toString("base64url"), ...(threadId ? { threadId } : {}) } },
+    );
+    return {
+      draftId: created.id,
+      messageId: created.message?.id ?? "",
+      threadId: created.message?.threadId ?? threadId ?? "",
+      subject,
+      to: to.map(formatAddress).join(", "),
+      cc: cc.map(formatAddress).join(", "),
     };
   },
 };

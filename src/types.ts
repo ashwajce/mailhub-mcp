@@ -69,11 +69,35 @@ export interface AttachmentData {
   data: Buffer;
 }
 
+export interface DraftInput {
+  /** Addresses as "jane@x.com" or "Jane Doe <jane@x.com>". */
+  to: string[];
+  cc: string[];
+  bcc: string[];
+  subject?: string;
+  body: string;
+  /** When set, the draft is a reply to this message and stays in its thread. */
+  replyToMessageId?: string;
+  replyAll?: boolean;
+}
+
+export interface DraftResult {
+  draftId: string;
+  messageId: string;
+  threadId: string;
+  subject: string;
+  to: string;
+  cc: string;
+  webLink?: string;
+}
+
 export interface Provider {
   search(account: Account, params: SearchParams): Promise<SearchResult>;
   read(account: Account, id: string, maxBodyChars: number): Promise<MessageFull>;
   thread(account: Account, threadId: string, maxBodyChars: number): Promise<MessageFull[]>;
   attachment(account: Account, messageId: string, attachmentId: string): Promise<AttachmentData>;
+  /** Creates a draft in the mailbox. Nothing is sent. */
+  createDraft(account: Account, draft: DraftInput): Promise<DraftResult>;
 }
 
 export class MailhubError extends Error {

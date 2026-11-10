@@ -24,6 +24,25 @@ export const gmailAccount = {
   addedAt: "2026-01-01T00:00:00.000Z",
 };
 
+/** Same mailbox types, but signed in with --drafts. */
+export const gmailDraftAccount = {
+  ...gmailAccount,
+  alias: "writer",
+  email: "writer@example.com",
+  login: "writer@example.com",
+  scopes: ["https://www.googleapis.com/auth/gmail.readonly", "https://www.googleapis.com/auth/gmail.compose"],
+};
+
+export const outlookDraftAccount = {
+  alias: "office",
+  provider: "outlook",
+  email: "me@contoso.example",
+  login: "me@contoso.example",
+  refreshToken: "ms-refresh-1",
+  scopes: ["offline_access", "User.Read", "Mail.Read", "Mail.ReadWrite"],
+  addedAt: "2026-01-01T00:00:00.000Z",
+};
+
 export const outlookAccount = {
   alias: "work",
   provider: "outlook",

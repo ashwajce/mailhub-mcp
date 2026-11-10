@@ -8,6 +8,36 @@ export const GMAIL_SCOPES = ["https://www.googleapis.com/auth/gmail.readonly"];
 export const OUTLOOK_SCOPES = ["offline_access", "User.Read", "Mail.Read"];
 export const OUTLOOK_SHARED_SCOPE = "Mail.Read.Shared";
 
+// Optional extra scopes, requested only when a mailbox is added with --drafts.
+// Gmail has no drafts-only scope: gmail.compose is the narrowest one that can create drafts.
+export const GMAIL_DRAFT_SCOPE = "https://www.googleapis.com/auth/gmail.compose";
+export const OUTLOOK_DRAFT_SCOPE = "Mail.ReadWrite";
+export const OUTLOOK_SHARED_DRAFT_SCOPE = "Mail.ReadWrite.Shared";
+
+/** Scopes to request when signing in to a mailbox. */
+export function scopesFor(provider: ProviderName, opts: { drafts?: boolean; shared?: boolean } = {}): string[] {
+  if (provider === "gmail") return opts.drafts ? [...GMAIL_SCOPES, GMAIL_DRAFT_SCOPE] : GMAIL_SCOPES;
+  const scopes = [...OUTLOOK_SCOPES];
+  if (opts.shared) scopes.push(OUTLOOK_SHARED_SCOPE);
+  if (opts.drafts) scopes.push(opts.shared ? OUTLOOK_SHARED_DRAFT_SCOPE : OUTLOOK_DRAFT_SCOPE);
+  return scopes;
+}
+
+/** Whether this mailbox was authorised for creating drafts. */
+export function canDraft(account: Account): boolean {
+  if (account.provider === "gmail") return account.scopes.includes(GMAIL_DRAFT_SCOPE);
+  return account.scopes.includes(account.sharedMailbox ? OUTLOOK_SHARED_DRAFT_SCOPE : OUTLOOK_DRAFT_SCOPE);
+}
+
+export function requireDraftAccess(account: Account): void {
+  if (canDraft(account)) return;
+  const shared = account.sharedMailbox ? ` --shared-mailbox ${account.sharedMailbox}` : "";
+  throw new MailhubError(
+    `Account "${account.alias}" is connected read-only. To allow drafts, run: ` +
+      `mailhub-mcp add ${account.provider} ${account.alias} --drafts --force${shared}`,
+  );
+}
+
 export interface OAuthSettings {
   authUrl: string;
   tokenUrl: string;
@@ -73,9 +103,12 @@ async function refresh(account: Account): Promise<string> {
     });
   } catch (err) {
     if (err instanceof OAuthError && (err.code === "invalid_grant" || err.code === "interaction_required")) {
+      const flags =
+        (canDraft(account) ? " --drafts" : "") +
+        (account.sharedMailbox ? ` --shared-mailbox ${account.sharedMailbox}` : "");
       throw new MailhubError(
         `Account "${account.alias}" (${account.login}) needs to be authorised again. ` +
-          `Run: mailhub-mcp add ${account.provider} ${account.alias} --force`,
+          `Run: mailhub-mcp add ${account.provider} ${account.alias} --force${flags}`,
       );
     }
     throw new MailhubError(`Could not refresh the token for "${account.alias}": ${(err as Error).message}`);
@@ -118,15 +151,30 @@ function errorDetail(text: string): string {
 }
 
 /**
- * Authenticated JSON GET against a mail API. Retries once on 401 with a fresh
- * token and backs off on throttling or transient server errors.
+ * Authenticated JSON request against a mail API (GET, or POST/PATCH when a body is given).
+ * Retries once on 401 with a fresh token and backs off on throttling. Transient
+ * server errors are retried for reads only, so a write is never applied twice.
  */
-export async function apiJson<T>(account: Account, url: string, headers: Record<string, string> = {}): Promise<T> {
+export async function apiJson<T>(
+  account: Account,
+  url: string,
+  headers: Record<string, string> = {},
+  body?: unknown,
+  method: "POST" | "PATCH" = "POST",
+): Promise<T> {
+  const isWrite = body !== undefined;
   let forced = false;
   for (let attempt = 0; ; attempt++) {
     const token = await accessToken(account);
     const res = await fetch(url, {
-      headers: { Accept: "application/json", ...headers, Authorization: `Bearer ${token}` },
+      method: isWrite ? method : "GET",
+      headers: {
+        Accept: "application/json",
+        ...(isWrite ? { "Content-Type": "application/json" } : {}),
+        ...headers,
+        Authorization: `Bearer ${token}`,
+      },
+      ...(isWrite ? { body: JSON.stringify(body) } : {}),
     });
     if (res.ok) return (await res.json()) as T;
 
@@ -135,7 +183,8 @@ export async function apiJson<T>(account: Account, url: string, headers: Record<
       cache.delete(account.alias);
       continue;
     }
-    if ((res.status === 429 || res.status === 502 || res.status === 503 || res.status === 504) && attempt < 3) {
+    const transient = res.status === 502 || res.status === 503 || res.status === 504;
+    if ((res.status === 429 || (transient && !isWrite)) && attempt < 3) {
       const retryAfter = Number(res.headers.get("retry-after"));
       const waitMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : 500 * 2 ** attempt;
       await sleep(Math.min(waitMs, 20_000));

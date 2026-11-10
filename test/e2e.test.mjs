@@ -10,7 +10,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { authorizeInBrowser } from "../dist/oauth.js";
 import { saveAccount } from "../dist/store.js";
-import { gmailAccount, json, makeHome, mockFetch, outlookAccount } from "./helpers.mjs";
+import { gmailAccount, gmailDraftAccount, json, makeHome, mockFetch, outlookAccount } from "./helpers.mjs";
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const cli = path.join(here, "..", "dist", "cli.js");
@@ -23,6 +23,7 @@ before(async () => {
   home = makeHome();
   saveAccount(gmailAccount);
   saveAccount(outlookAccount);
+  saveAccount(gmailDraftAccount);
   client = new Client({ name: "mailhub-test", version: "0.0.0" });
   await client.connect(
     new StdioClientTransport({
@@ -44,12 +45,14 @@ const call = async (name, args = {}) => {
   return { isError: result.isError === true, text, data: result.isError ? undefined : JSON.parse(text) };
 };
 
-test("server advertises the five tools and usage instructions over stdio", async () => {
+test("server advertises its tools and usage instructions over stdio", async () => {
   const { tools } = await client.listTools();
   assert.deepEqual(
     tools.map((t) => t.name).sort(),
-    ["download_attachment", "list_accounts", "read_email", "read_thread", "search_emails"],
+    ["create_draft", "download_attachment", "list_accounts", "read_email", "read_thread", "search_emails"],
   );
+  // There must be no way to send, delete or modify mail.
+  assert.equal(tools.some((t) => /send|delete|trash|move|label|update/i.test(t.name)), false);
   const search = tools.find((t) => t.name === "search_emails");
   assert.ok(search.inputSchema.properties.account);
   assert.equal(search.annotations.readOnlyHint, true);
@@ -59,8 +62,9 @@ test("server advertises the five tools and usage instructions over stdio", async
 test("list_accounts never exposes tokens", async () => {
   const { data, text } = await call("list_accounts");
   assert.deepEqual(data.accounts, [
-    { alias: "personal", provider: "gmail", email: "me@example.com" },
-    { alias: "work", provider: "outlook", email: "me@contoso.example" },
+    { alias: "personal", provider: "gmail", email: "me@example.com", can_draft: false },
+    { alias: "work", provider: "outlook", email: "me@contoso.example", can_draft: false },
+    { alias: "writer", provider: "gmail", email: "writer@example.com", can_draft: true },
   ]);
   assert.doesNotMatch(text, /refresh/i);
 });
@@ -73,13 +77,14 @@ test("search_emails fans out across every mailbox by default", async () => {
     [
       ["personal", "gmail", 1, "Gmail invoice", "gt1"],
       ["work", "outlook", 1, "Outlook invoice", "oc1"],
+      ["writer", "gmail", 1, "Gmail invoice", "gt1"],
     ],
   );
 });
 
 test("one failing mailbox is reported without losing the others", async () => {
   const { data } = await call("search_emails", { query: "blocked" });
-  assert.deepEqual(data.results.map((r) => r.account), ["personal"]);
+  assert.deepEqual(data.results.map((r) => r.account), ["personal", "writer"]);
   assert.equal(data.errors.length, 1);
   assert.equal(data.errors[0].account, "work");
   assert.match(data.errors[0].error, /403/);
@@ -103,7 +108,7 @@ test("read_email and download_attachment work end to end", async () => {
 test("bad input comes back as a tool error, not a crash", async () => {
   const unknown = await call("read_email", { account: "nope", id: "x" });
   assert.equal(unknown.isError, true);
-  assert.match(unknown.text, /No account with alias "nope"\. Known aliases: personal, work/);
+  assert.match(unknown.text, /No account with alias "nope"\. Known aliases: personal, work, writer/);
 
   const paging = await call("search_emails", { page_token: "abc" });
   assert.equal(paging.isError, true);
@@ -113,14 +118,41 @@ test("bad input comes back as a tool error, not a crash", async () => {
   assert.equal(date.isError, true);
 
   // The server is still alive afterwards.
-  assert.equal((await call("list_accounts")).data.accounts.length, 2);
+  assert.equal((await call("list_accounts")).data.accounts.length, 3);
+});
+
+test("create_draft saves a draft only where drafting was enabled", async () => {
+  const refused = await call("create_draft", { account: "personal", to: ["jane@example.org"], subject: "Hi", body: "Hello" });
+  assert.equal(refused.isError, true);
+  assert.match(refused.text, /connected read-only.*mailhub-mcp add gmail personal --drafts --force/);
+
+  const { data } = await call("create_draft", {
+    account: "writer",
+    to: ["Jane Doe <jane@example.org>"],
+    subject: "Quarterly figures",
+    body: "Hello Jane,\n\nFigures attached.\n",
+  });
+  assert.match(data.status, /not been sent/);
+  assert.deepEqual(
+    [data.account, data.draft_id, data.message_id, data.thread_id, data.subject, data.to],
+    ["writer", "d1", "dm1", "dt1", "Quarterly figures", "Jane Doe <jane@example.org>"],
+  );
+
+  const noSubject = await call("create_draft", { account: "writer", to: ["jane@example.org"], body: "Hello" });
+  assert.equal(noSubject.isError, true);
+  assert.match(noSubject.text, /needs a subject/);
+
+  const badAddress = await call("create_draft", { account: "writer", to: ["not-an-address"], subject: "x", body: "y" });
+  assert.equal(badAddress.isError, true);
+  assert.match(badAddress.text, /not a valid email address/);
 });
 
 test("cli lists accounts and reports health", () => {
   const env = { ...process.env, MAILHUB_HOME: home };
   const list = execFileSync(process.execPath, [cli, "list"], { env, encoding: "utf8" });
-  assert.match(list, /personal\s+gmail\s+me@example\.com/);
-  assert.match(list, /work\s+outlook\s+me@contoso\.example/);
+  assert.match(list, /personal\s+gmail\s+read-only\s+me@example\.com/);
+  assert.match(list, /work\s+outlook\s+read-only\s+me@contoso\.example/);
+  assert.match(list, /writer\s+gmail\s+read\+drafts\s+writer@example\.com/);
   const check = execFileSync(process.execPath, ["--import", preload, cli, "check"], { env, encoding: "utf8" });
   assert.match(check, /ok\s+personal\s+me@example\.com\s+latest mail 2026-01-01/);
   assert.match(check, /ok\s+work/);

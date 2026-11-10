@@ -1,7 +1,7 @@
 {
   "name": "mailhub-mcp",
-  "version": "0.1.0",
-  "description": "Local MCP server that puts many Gmail and Outlook mailboxes behind one connector for Claude. Authorise each account once, search old and new mail across all of them.",
+  "version": "0.2.0",
+  "description": "Local MCP server that puts many Gmail and Outlook mailboxes behind one connector for Claude. Authorise each account once, search old and new mail across all of them, and optionally save drafts.",
   "type": "module",
   "main": "dist/cli.js",
   "bin": {
