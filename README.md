@@ -155,6 +155,8 @@ Run `mailhub-mcp paths` to print the exact locations. Environment variables over
 To revoke access entirely, remove the alias and also remove the app under
 <https://myaccount.google.com/permissions> or <https://myaccount.microsoft.com> (or Entra "Enterprise applications").
 
+See [PRIVACY.md](PRIVACY.md) for what mailhub accesses and where data goes.
+
 ## How long do sign-ins last?
 
 - **Google**: indefinitely with the app "In production", unless you revoke access, change the password
